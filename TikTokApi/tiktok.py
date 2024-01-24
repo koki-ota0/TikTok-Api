@@ -8,18 +8,18 @@ import json
 
 from playwright.async_api import async_playwright
 from urllib.parse import urlencode, quote, urlparse
-from .stealth import stealth_async
-from .helpers import random_choice
+from stealth.stealth import stealth_async
+from helpers import random_choice
 
-from .api.user import User
-from .api.video import Video
-from .api.sound import Sound
-from .api.hashtag import Hashtag
-from .api.comment import Comment
-from .api.trending import Trending
-from .api.search import Search
+from api.user import User
+from api.video import Video
+from api.sound import Sound
+from api.hashtag import Hashtag
+from api.comment import Comment
+from api.trending import Trending
+from api.search import Search
 
-from .exceptions import (
+from exceptions import (
     InvalidJSONException,
     EmptyResponseException,
 )
@@ -243,7 +243,7 @@ class TikTokApi:
             override_browser_args = ["--headless=new"]
             headless = False  # managed by the arg
         self.browser = await self.playwright.chromium.launch(
-            headless=headless, args=override_browser_args
+            headless=headless, args=override_browser_args, proxy=random_choice(proxies)
         )
 
         await asyncio.gather(
@@ -338,6 +338,7 @@ class TikTokApi:
     async def generate_x_bogus(self, url: str, **kwargs):
         """Generate the X-Bogus header for a url"""
         _, session = self._get_session(**kwargs)
+        await session.page.wait_for_function("window.byted_acrawler !== undefined")
         result = await session.page.evaluate(
             f'() => {{ return window.byted_acrawler.frontierSign("{url}") }}'
         )
@@ -426,7 +427,7 @@ class TikTokApi:
                 raise Exception("TikTokApi.run_fetch_script returned None")
 
             if result == "":
-                raise EmptyResponseException()
+                raise EmptyResponseException(result, "TikTok returned an empty response")
 
             try:
                 data = json.loads(result)

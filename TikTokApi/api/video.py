@@ -1,9 +1,9 @@
 from __future__ import annotations
-from ..helpers import extract_video_id_from_url
+from TikTokApi.helpers import extract_video_id_from_url
 from typing import TYPE_CHECKING, ClassVar, Iterator, Optional
 from datetime import datetime
 import requests
-from ..exceptions import InvalidResponseException
+from TikTokApi.exceptions import InvalidResponseException
 import json
 
 if TYPE_CHECKING:
@@ -102,25 +102,55 @@ class Video:
                 r.text, "TikTok returned an invalid response.", error_code=r.status_code
             )
 
+        # Try SIGI_STATE first
         # extract tag <script id="SIGI_STATE" type="application/json">{..}</script>
         # extract json in the middle
 
         start = r.text.find('<script id="SIGI_STATE" type="application/json">')
-        if start == -1:
-            raise InvalidResponseException(
-                r.text, "TikTok returned an invalid response.", error_code=r.status_code
-            )
+        if start != -1:
+            start += len('<script id="SIGI_STATE" type="application/json">')
+            end = r.text.find("</script>", start)
 
-        start += len('<script id="SIGI_STATE" type="application/json">')
-        end = r.text.find("</script>", start)
+            if end == -1:
+                raise InvalidResponseException(
+                    r.text, "TikTok returned an invalid response.", error_code=r.status_code
+                )
 
-        if end == -1:
-            raise InvalidResponseException(
-                r.text, "TikTok returned an invalid response.", error_code=r.status_code
-            )
+            data = json.loads(r.text[start:end])
+            video_info = data["ItemModule"][self.id]
+        else:
+            # Try __UNIVERSAL_DATA_FOR_REHYDRATION__ next
 
-        data = json.loads(r.text[start:end])
-        video_info = data["ItemModule"][self.id]
+            # extract tag <script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">{..}</script>
+            # extract json in the middle
+
+            start = r.text.find('<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">')
+            if start == -1:
+                raise InvalidResponseException(
+                    r.text, "TikTok returned an invalid response.", error_code=r.status_code
+                )
+
+            start += len('<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">')
+            end = r.text.find("</script>", start)
+
+            if end == -1:
+                raise InvalidResponseException(
+                    r.text, "TikTok returned an invalid response.", error_code=r.status_code
+                )
+
+            data = json.loads(r.text[start:end])
+            default_scope = data.get("__DEFAULT_SCOPE__", {})
+            video_detail = default_scope.get("webapp.video-detail", {})
+            if video_detail.get("statusCode", 0) != 0: # assume 0 if not present
+                raise InvalidResponseException(
+                    r.text, "TikTok returned an invalid response structure.", error_code=r.status_code
+                )
+            video_info = video_detail.get("itemInfo", {}).get("itemStruct")
+            if video_info is None:
+                raise InvalidResponseException(
+                    r.text, "TikTok returned an invalid response structure.", error_code=r.status_code
+                )
+            
         self.as_dict = video_info
         self.__extract_from_data()
         return video_info
@@ -203,6 +233,44 @@ class Video:
             Video.parent.logger.error(
                 f"Failed to create Video with data: {data}\nwhich has keys {data.keys()}"
             )
+            
+    async def all_comments(self, cursor=0, **kwargs) -> Iterator[Comment]:
+        """
+        Returns all the comments of a TikTok Video.
+
+        Parameters:
+            kwargs: Additional keyword arguments.
+
+        Returns:
+            async iterator/generator: Yields TikTokApi.comment objects.
+        """
+        cursor = cursor
+        while True:
+            params = {
+                "aweme_id": self.id,
+                "count": 20,
+                "cursor": cursor,
+            }
+
+            resp = await self.parent.make_request(
+                url="https://www.tiktok.com/api/comment/list/",
+                params=params,
+                headers=kwargs.get("headers"),
+                session_index=kwargs.get("session_index"),
+            )
+
+            if resp is None:
+                raise InvalidResponseException(
+                    resp, "TikTok returned an invalid response."
+                )
+
+            for video in resp.get("comments", []):
+                yield self.parent.comment(data=video)
+
+            if not resp.get("has_more", False):
+                break
+
+            cursor = resp.get("cursor")
 
     async def comments(self, count=20, cursor=0, **kwargs) -> Iterator[Comment]:
         """
@@ -242,9 +310,11 @@ class Video:
                     resp, "TikTok returned an invalid response."
                 )
 
-            for video in resp.get("comments", []):
-                yield self.parent.comment(data=video)
-                found += 1
+            comments = resp.get("comments")
+            if comments is not None:
+                for video in comments:
+                    yield self.parent.comment(data=video)
+                    found += 1
 
             if not resp.get("has_more", False):
                 return
